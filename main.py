@@ -5,13 +5,31 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
+
+from pyrogram import Client, filters
+import asyncio
+import random
+import os
+from dotenv import load_dotenv
+from datetime import datetime, timedelta
+
 load_dotenv()
 
-app = Client(
-    "media_cleaner",
-    api_id=int(os.getenv("API_ID")),
-    api_hash=os.getenv("API_HASH")
-)
+SESSION_STRING = os.getenv("SESSION_STRING")
+
+if SESSION_STRING:
+    app = Client(
+        "media_cleaner",
+        api_id=int(os.getenv("API_ID")),
+        api_hash=os.getenv("API_HASH"),
+        session_string=SESSION_STRING
+    )
+else:
+    app = Client(
+        "media_cleaner",
+        api_id=int(os.getenv("API_ID")),
+        api_hash=os.getenv("API_HASH")
+    )
 
 DELAY = int(os.getenv("DELETION_DELAY_SECONDS", "40"))
 STICKER_DELAY = int(os.getenv("STICKER_DELETION_DELAY_SECONDS", "360"))  # Default 5 minutes (300 seconds)
