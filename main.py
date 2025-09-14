@@ -4,14 +4,7 @@ import random
 import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-
-
-from pyrogram import Client, filters
-import asyncio
-import random
-import os
-from dotenv import load_dotenv
-from datetime import datetime, timedelta
+import json
 
 load_dotenv()
 
@@ -42,6 +35,32 @@ MAX_DELETIONS_PER_MINUTE = int(os.getenv("DELETION_DELAY_SECONDS", "20"))  # Adj
 # Cache for admin status to avoid repeated API calls
 admin_cache = {}
 CACHE_DURATION = timedelta(minutes=5)  # Cache admin status for 5 minutes
+
+# Sudo users list stored in a JSON file
+SUDO_FILE = "sudo_users.json"
+
+def load_sudo_users():
+    """Load sudo users from file."""
+    try:
+        if os.path.exists(SUDO_FILE):
+            with open(SUDO_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Error loading sudo users: {e}")
+    return []
+
+def save_sudo_users(sudo_list):
+    """Save sudo users to file."""
+    try:
+        with open(SUDO_FILE, 'w') as f:
+            json.dump(sudo_list, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving sudo users: {e}")
+        return False
+
+# Initialize sudo users list
+SUDO_USERS = load_sudo_users()
 
 
 async def can_delete():
@@ -139,6 +158,11 @@ async def check_media(client, message):
     # Skip if message is from owner
     if message.from_user and message.from_user.id == OWNER_ID:
         print(f"👑 Skipping media from owner (ID: {OWNER_ID})")
+        return
+    
+    # Skip if message is from sudo user
+    if message.from_user and message.from_user.id in SUDO_USERS:
+        print(f"🛡️ Skipping media from sudo user @{message.from_user.username} (ID: {message.from_user.id})")
         return
     
     # Determine media type
@@ -256,8 +280,9 @@ async def check_status(client, message):
         # Show current delay settings and owner ID
         delay_info = f"\n⏱️ Media delay: {DELAY}s | Sticker delay: {STICKER_DELAY}s"
         owner_info = f"\n👑 Owner ID: {OWNER_ID if OWNER_ID != 0 else 'Not set'}"
+        sudo_info = f"\n🛡️ Sudo users: {len(SUDO_USERS)}"
         
-        await message.edit(f"Status in '{message.chat.title}': {status_text}{delay_info}{owner_info}")
+        await message.edit(f"Status in '{message.chat.title}': {status_text}{delay_info}{owner_info}{sudo_info}")
     except Exception as e:
         await message.edit(f"❌ Error: {e}")
     
@@ -285,9 +310,164 @@ async def test_delete(client, message):
     await message.delete()
 
 
+# Command to add sudo user - send .addsudo replying to a user or with user ID
+@app.on_message(filters.command("addsudo", prefixes=".") & filters.me)
+async def add_sudo(client, message):
+    """Add a user to sudo list."""
+    global SUDO_USERS
+    
+    try:
+        # Check if replying to a message
+        if message.reply_to_message and message.reply_to_message.from_user:
+            user_id = message.reply_to_message.from_user.id
+            username = message.reply_to_message.from_user.username
+            first_name = message.reply_to_message.from_user.first_name
+        elif len(message.command) > 1:
+            # Try to parse user ID from command
+            try:
+                user_id = int(message.command[1])
+                # Try to get user info
+                try:
+                    user = await client.get_users(user_id)
+                    username = user.username
+                    first_name = user.first_name
+                except:
+                    username = None
+                    first_name = "Unknown"
+            except ValueError:
+                await message.edit("⚠️ Invalid user ID! Reply to a user or provide a valid user ID.")
+                await asyncio.sleep(3)
+                await message.delete()
+                return
+        else:
+            await message.edit("⚠️ Reply to a user or provide a user ID!")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+        
+        # Check if user is owner
+        if user_id == OWNER_ID:
+            await message.edit("⚠️ Owner is already privileged!")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+        
+        # Check if already in sudo list
+        if user_id in SUDO_USERS:
+            await message.edit(f"⚠️ User {first_name} (@{username}) is already a sudo user!")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+        
+        # Add to sudo list
+        SUDO_USERS.append(user_id)
+        if save_sudo_users(SUDO_USERS):
+            user_info = f"{first_name} (@{username})" if username else f"{first_name}"
+            await message.edit(f"✅ Added {user_info} (ID: {user_id}) to sudo users!")
+            print(f"🛡️ Added sudo user: {user_info} (ID: {user_id})")
+        else:
+            await message.edit("❌ Failed to save sudo users!")
+        
+    except Exception as e:
+        await message.edit(f"❌ Error: {e}")
+    
+    await asyncio.sleep(3)
+    await message.delete()
+
+
+# Command to list sudo users - send .listsudo
+@app.on_message(filters.command("listsudo", prefixes=".") & filters.me)
+async def list_sudo(client, message):
+    """List all sudo users."""
+    try:
+        if not SUDO_USERS:
+            await message.edit("📋 No sudo users found!")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+        
+        sudo_list = "🛡️ **Sudo Users:**\n\n"
+        
+        for i, user_id in enumerate(SUDO_USERS, 1):
+            try:
+                user = await client.get_users(user_id)
+                username = f"@{user.username}" if user.username else "No username"
+                name = user.first_name or "Unknown"
+                sudo_list += f"{i}. {name} ({username}) - ID: `{user_id}`\n"
+            except:
+                sudo_list += f"{i}. Unknown User - ID: `{user_id}`\n"
+        
+        sudo_list += f"\n📊 Total sudo users: {len(SUDO_USERS)}"
+        await message.edit(sudo_list)
+        
+    except Exception as e:
+        await message.edit(f"❌ Error: {e}")
+    
+    await asyncio.sleep(10)
+    await message.delete()
+
+
+# Command to remove sudo user - send .rmsudo replying to a user or with user ID
+@app.on_message(filters.command("rmsudo", prefixes=".") & filters.me)
+async def remove_sudo(client, message):
+    """Remove a user from sudo list."""
+    global SUDO_USERS
+    
+    try:
+        # Check if replying to a message
+        if message.reply_to_message and message.reply_to_message.from_user:
+            user_id = message.reply_to_message.from_user.id
+            username = message.reply_to_message.from_user.username
+            first_name = message.reply_to_message.from_user.first_name
+        elif len(message.command) > 1:
+            # Try to parse user ID from command
+            try:
+                user_id = int(message.command[1])
+                # Try to get user info
+                try:
+                    user = await client.get_users(user_id)
+                    username = user.username
+                    first_name = user.first_name
+                except:
+                    username = None
+                    first_name = "Unknown"
+            except ValueError:
+                await message.edit("⚠️ Invalid user ID! Reply to a user or provide a valid user ID.")
+                await asyncio.sleep(3)
+                await message.delete()
+                return
+        else:
+            await message.edit("⚠️ Reply to a user or provide a user ID!")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+        
+        # Check if user is in sudo list
+        if user_id not in SUDO_USERS:
+            await message.edit(f"⚠️ User {first_name} (@{username}) is not a sudo user!")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+        
+        # Remove from sudo list
+        SUDO_USERS.remove(user_id)
+        if save_sudo_users(SUDO_USERS):
+            user_info = f"{first_name} (@{username})" if username else f"{first_name}"
+            await message.edit(f"✅ Removed {user_info} (ID: {user_id}) from sudo users!")
+            print(f"🛡️ Removed sudo user: {user_info} (ID: {user_id})")
+        else:
+            await message.edit("❌ Failed to save sudo users!")
+        
+    except Exception as e:
+        await message.edit(f"❌ Error: {e}")
+    
+    await asyncio.sleep(3)
+    await message.delete()
+
+
 print("Starting media cleaner userbot...")
 print(f"⏱️  Media deletion delay: {DELAY} seconds")
 print(f"🎨 Sticker deletion delay: {STICKER_DELAY} seconds")
 print(f"👑 Owner ID: {OWNER_ID if OWNER_ID != 0 else 'Not set'}")
-print("Commands: clearcache, checkstatus, testdelete")
+print("Commands: addsudo, listsudo, rmsudo, clearcache, checkstatus, testdelete")
 app.run()
