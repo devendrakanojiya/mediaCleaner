@@ -8,6 +8,62 @@ import json
 
 load_dotenv()
 
+# Configuration management
+CONFIG_FILE = "runtime_config.json"
+
+# Default configuration from .env
+DEFAULT_CONFIG = {
+    "DELETION_DELAY_SECONDS": int(os.getenv("DELETION_DELAY_SECONDS", "40")),
+    "STICKER_DELETION_DELAY_SECONDS": int(os.getenv("STICKER_DELETION_DELAY_SECONDS", "360")),
+    "MAX_DELETIONS_PER_MINUTE": int(os.getenv("MAX_DELETIONS_PER_MINUTE", "20")),
+    "OWNER_ID": int(os.getenv("OWNER_ID", "1873281192")),
+    "STICKER_GIF_DELETION_ENABLED": True
+}
+
+def load_runtime_config():
+    """Load runtime configuration from file, or use defaults."""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                saved_config = json.load(f)
+                # Merge with defaults to ensure all keys exist
+                config = DEFAULT_CONFIG.copy()
+                config.update(saved_config)
+                return config
+    except Exception as e:
+        print(f"Error loading runtime config: {e}")
+    return DEFAULT_CONFIG.copy()
+
+def save_runtime_config():
+    """Save current runtime configuration to file."""
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(RUNTIME_CONFIG, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving runtime config: {e}")
+        return False
+
+# Initialize runtime configuration
+RUNTIME_CONFIG = load_runtime_config()
+
+# Create convenient references (these will update when RUNTIME_CONFIG changes)
+def get_delay():
+    return RUNTIME_CONFIG["DELETION_DELAY_SECONDS"]
+
+def get_sticker_delay():
+    return RUNTIME_CONFIG["STICKER_DELETION_DELAY_SECONDS"]
+
+def get_max_deletions():
+    return RUNTIME_CONFIG["MAX_DELETIONS_PER_MINUTE"]
+
+def get_owner_id():
+    return RUNTIME_CONFIG["OWNER_ID"]
+
+def is_sticker_deletion_enabled():
+    return RUNTIME_CONFIG["STICKER_GIF_DELETION_ENABLED"]
+
+# Session configuration (these can't be changed at runtime)
 SESSION_STRING = os.getenv("SESSION_STRING")
 
 if SESSION_STRING:
@@ -24,18 +80,12 @@ else:
         api_hash=os.getenv("API_HASH")
     )
 
-DELAY = int(os.getenv("DELETION_DELAY_SECONDS", "40"))
-STICKER_DELAY = int(os.getenv("STICKER_DELETION_DELAY_SECONDS", "360"))  # Default 5 minutes (300 seconds)
-STICKER_GIF_DELETION_ENABLED = True  # Default to enabled
-OWNER_ID = int(os.getenv("OWNER_ID", "1873281192"))  # Add OWNER_ID environment variable
-
 # Rate limiting
 deletion_times = []
-MAX_DELETIONS_PER_MINUTE = int(os.getenv("DELETION_DELAY_SECONDS", "20"))  # Adjust based on your needs
 
 # Cache for admin status to avoid repeated API calls
 admin_cache = {}
-CACHE_DURATION = timedelta(minutes=5)  # Cache admin status for 5 minutes
+CACHE_DURATION = timedelta(minutes=5)
 
 # Sudo users list stored in a JSON file
 SUDO_FILE = "sudo_users.json"
@@ -63,11 +113,10 @@ def save_sudo_users(sudo_list):
 # Initialize sudo users list
 SUDO_USERS = load_sudo_users()
 
-# Start 
 # Quick Actions variables
 BOT_PAUSED = False
 PAUSE_REASON = ""
-TEMP_EXEMPTIONS = {}  # {user_id: expiration_time}
+TEMP_EXEMPTIONS = {}
 EXEMPTIONS_FILE = "temp_exemptions.json"
 
 def load_exemptions():
@@ -76,7 +125,6 @@ def load_exemptions():
         if os.path.exists(EXEMPTIONS_FILE):
             with open(EXEMPTIONS_FILE, 'r') as f:
                 data = json.load(f)
-                # Convert string timestamps back to datetime objects
                 return {int(user_id): datetime.fromisoformat(exp_time) 
                        for user_id, exp_time in data.items()}
     except Exception as e:
@@ -86,7 +134,6 @@ def load_exemptions():
 def save_exemptions():
     """Save temporary exemptions to file."""
     try:
-        # Convert datetime objects to ISO format strings for JSON
         data = {str(user_id): exp_time.isoformat() 
                for user_id, exp_time in TEMP_EXEMPTIONS.items()}
         with open(EXEMPTIONS_FILE, 'w') as f:
@@ -98,106 +145,163 @@ def save_exemptions():
 
 # Initialize exemptions
 TEMP_EXEMPTIONS = load_exemptions()
-# End
 
 async def can_delete():
     """Check if we can delete based on rate limit."""
     now = datetime.now()
-    # Remove deletions older than 1 minute
     deletion_times[:] = [t for t in deletion_times if now - t < timedelta(minutes=1)]
-    return len(deletion_times) < MAX_DELETIONS_PER_MINUTE
+    return len(deletion_times) < get_max_deletions()
 
-
-async def check_admin_rights(client, chat_id, force_check=False):
-    """Check if the user account has admin rights with delete permission."""
-    # Check cache first (unless force_check is True)
-    cache_key = f"{chat_id}"
-    if not force_check and cache_key in admin_cache:
-        cached_time, has_rights = admin_cache[cache_key]
-        if datetime.now() - cached_time < CACHE_DURATION:
-            return has_rights
-    
+# Command to set configuration values - send .setconfig key value
+@app.on_message(filters.command("setconfig", prefixes=".") & filters.me)
+async def set_config(client, message):
+    """Set runtime configuration values."""
     try:
-        # Get chat info first
-        chat = await client.get_chat(chat_id)
-        # print(f"🔍 Debug - Checking permissions in: {chat.title}")
+        if len(message.command) < 3:
+            config_help = (
+                "⚙️ **Configuration Options:**\n\n"
+                "• `delay` - Media deletion delay (seconds)\n"
+                "• `stickerdelay` - Sticker/GIF delay (seconds)\n"
+                "• `maxdeletions` - Max deletions per minute\n"
+                "• `owner` - Owner user ID\n\n"
+                "**Usage:** `.setconfig delay 60`"
+            )
+            await message.edit(config_help)
+            await asyncio.sleep(5)
+            await message.delete()
+            return
         
-        # Get my own info
-        me = await client.get_me()
+        key = message.command[1].lower()
+        value = message.command[2]
         
-        # Try to get member info
+        # Map user-friendly keys to config keys
+        key_map = {
+            "delay": "DELETION_DELAY_SECONDS",
+            "stickerdelay": "STICKER_DELETION_DELAY_SECONDS",
+            "maxdeletions": "MAX_DELETIONS_PER_MINUTE",
+            "owner": "OWNER_ID"
+        }
+        
+        if key not in key_map:
+            await message.edit(f"❌ Unknown config key: {key}")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+        
+        config_key = key_map[key]
+        
+        # Validate and convert value
         try:
-            member = await client.get_chat_member(chat_id, me.id)
-            # print(f"🔍 Debug - My ID: {me.id}")
-            # print(f"🔍 Debug - My username: @{me.username if me.username else 'No username'}")
-            # print(f"🔍 Debug - Member object: {member}")
-            # print(f"🔍 Debug - Status: {member.status}")
-            
-            # Check the string representation of status
-            status_str = str(member.status).lower()
-            # print(f"🔍 Debug - Status string: {status_str}")
-            
-            # Check different status types (handle both enum and string)
-            if "creator" in status_str or member.status == "creator":
-                has_delete_rights = True
-                # print(f"🔍 Debug - I am the creator, have all rights")
-            elif "administrator" in status_str or member.status == "administrator":
-                # For user accounts as admin, try different ways to check privileges
-                has_delete_rights = True  # Default to True for admins
-                
-                # Try to access privileges in different ways
-                if hasattr(member, 'privileges') and member.privileges:
-                    if hasattr(member.privileges, 'can_delete_messages'):
-                        has_delete_rights = bool(member.privileges.can_delete_messages)
-                        # print(f"🔍 Debug - Admin with delete rights (from privileges): {has_delete_rights}")
-                    # else:
-                        # print(f"🔍 Debug - Admin (privileges exist but no can_delete_messages attribute)")
-                elif hasattr(member, 'can_delete_messages'):
-                    has_delete_rights = bool(member.can_delete_messages)
-                    # print(f"🔍 Debug - Admin with delete rights (direct attribute): {has_delete_rights}")
+            if config_key == "OWNER_ID":
+                # For owner ID, accept username or ID
+                if value.startswith("@"):
+                    # Get user ID from username
+                    user = await client.get_users(value)
+                    new_value = user.id
                 else:
-                    print(f"🔍 Debug - Admin (assuming delete rights - no privilege info available)")
+                    new_value = int(value)
             else:
-                has_delete_rights = False
-                # print(f"🔍 Debug - Not an admin (status: {member.status})")
-                
+                new_value = int(value)
+                if new_value < 1:
+                    raise ValueError("Value must be positive")
         except Exception as e:
-            print(f"🔍 Debug - Error getting member info: {e}")
-            # If we can't get member info, try a different approach
-            # Try to delete a non-existent message to check permissions
-            try:
-                await client.delete_messages(chat_id, [999999999])
-            except Exception as del_error:
-                error_str = str(del_error).lower()
-                if "message_ids_empty" in error_str or "message to delete not found" in error_str:
-                    # This error means we have permission but message doesn't exist
-                    has_delete_rights = True
-                    print(f"🔍 Debug - Have delete rights (tested with dummy delete)")
-                else:
-                    has_delete_rights = False
-                    print(f"🔍 Debug - No delete rights (test failed: {del_error})")
+            await message.edit(f"❌ Invalid value: {e}")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
         
-        # Cache the result
-        admin_cache[cache_key] = (datetime.now(), has_delete_rights)
+        # Update configuration
+        old_value = RUNTIME_CONFIG[config_key]
+        RUNTIME_CONFIG[config_key] = new_value
         
-        # print(f"🔍 Debug - Final decision: {'Has' if has_delete_rights else 'No'} delete rights")
-        return has_delete_rights
+        if save_runtime_config():
+            await message.edit(
+                f"✅ Configuration updated!\n\n"
+                f"**{key}**: {old_value} → {new_value}"
+            )
+            print(f"⚙️ Config updated: {config_key} = {new_value}")
+        else:
+            RUNTIME_CONFIG[config_key] = old_value  # Rollback on save failure
+            await message.edit("❌ Failed to save configuration!")
         
     except Exception as e:
-        print(f"❌ Error in check_admin_rights: {e}")
-        admin_cache[cache_key] = (datetime.now(), False)
-        return False
+        await message.edit(f"❌ Error: {e}")
+    
+    await asyncio.sleep(3)
+    await message.delete()
 
+# Command to view current configuration - send .config
+@app.on_message(filters.command("config", prefixes=".") & filters.me)
+async def view_config(client, message):
+    """View current runtime configuration."""
+    try:
+        # Get owner info
+        owner_info = f"ID: {get_owner_id()}"
+        if get_owner_id() != 0:
+            try:
+                owner_user = await client.get_users(get_owner_id())
+                if owner_user.username:
+                    owner_info = f"@{owner_user.username} ({get_owner_id()})"
+                else:
+                    owner_info = f"{owner_user.first_name} ({get_owner_id()})"
+            except:
+                pass
+        
+        config_text = (
+            "⚙️ **Current Configuration:**\n\n"
+            f"• **Media Delay:** {get_delay()} seconds\n"
+            f"• **Sticker/GIF Delay:** {get_sticker_delay()} seconds\n"
+            f"• **Max Deletions/Min:** {get_max_deletions()}\n"
+            f"• **Owner:** {owner_info}\n"
+            f"• **Sticker/GIF Deletion:** {'✅ ON' if is_sticker_deletion_enabled() else '❌ OFF'}\n\n"
+            f"📝 Use `.setconfig` to change values"
+        )
+        
+        await message.edit(config_text)
+        
+    except Exception as e:
+        await message.edit(f"❌ Error: {e}")
+    
+    await asyncio.sleep(7)
+    await message.delete()
 
-@app.on_message(filters.group & ~filters.me)  # Don't process my own messages
+# Command to reset configuration to defaults - send .resetconfig
+@app.on_message(filters.command("resetconfig", prefixes=".") & filters.me)
+async def reset_config(client, message):
+    """Reset configuration to defaults from .env file."""
+    global RUNTIME_CONFIG
+    
+    try:
+        # Confirm reset
+        if len(message.command) > 1 and message.command[1].lower() == "confirm":
+            RUNTIME_CONFIG = DEFAULT_CONFIG.copy()
+            if save_runtime_config():
+                await message.edit("✅ Configuration reset to defaults!")
+                print("⚙️ Configuration reset to defaults")
+            else:
+                await message.edit("❌ Failed to save configuration!")
+        else:
+            await message.edit(
+                "⚠️ This will reset all configuration to defaults!\n"
+                "To confirm, use: `.resetconfig confirm`"
+            )
+        
+    except Exception as e:
+        await message.edit(f"❌ Error: {e}")
+    
+    await asyncio.sleep(3)
+    await message.delete()
+
+# Update your existing check_media function to use runtime config
+@app.on_message(filters.group & ~filters.me)
 async def check_media(client, message):
     """Check all group messages with rate limiting and permission checking."""
-        # Check if bot is paused
     if BOT_PAUSED:
         return
+    
     # Skip if message is from owner
-    if message.from_user and message.from_user.id == OWNER_ID:
-        print(f"👑 Skipping media from owner (ID: {OWNER_ID})")
+    if message.from_user and message.from_user.id == get_owner_id():
+        print(f"👑 Skipping media from owner (ID: {get_owner_id()})")
         return
     
     # Skip if message is from sudo user
@@ -238,8 +342,8 @@ async def check_media(client, message):
     if not media_type:
         return
 
-    # NEW: Check if sticker/GIF deletion is disabled
-    if media_type in ["sticker", "animation"] and not STICKER_GIF_DELETION_ENABLED:
+    # Check if sticker/GIF deletion is disabled
+    if media_type in ["sticker", "animation"] and not is_sticker_deletion_enabled():
         return
     
     sender = message.from_user.username if message.from_user else "Unknown"
@@ -262,7 +366,7 @@ async def check_media(client, message):
     
     # Determine delay based on media type (stickers and GIFs use STICKER_DELAY)
     if media_type == "sticker" or media_type == "animation":
-        base_delay = STICKER_DELAY
+        base_delay = get_sticker_delay()
         
         if media_type == "sticker":
             # Add emoji to indicate sticker type
@@ -278,7 +382,7 @@ async def check_media(client, message):
         else:  # animation/GIF
             print(f"🎬 GIF detected from @{sender} (ID: {sender_id}) in '{chat_title}'")
     else:
-        base_delay = DELAY
+        base_delay = get_delay()
     
     # Add random delay to appear more human-like
     random_delay = base_delay + random.randint(0, 5)
@@ -310,23 +414,13 @@ async def check_media(client, message):
         if "MESSAGE_DELETE_FORBIDDEN" in str(e) or "not enough rights" in str(e).lower():
             admin_cache[f"{message.chat.id}"] = (datetime.now(), False)
 
+# Keep your existing check_admin_rights function unchanged
 
-# Command to clear cache - send .clearcache in any chat
-@app.on_message(filters.command("clearcache", prefixes=".") & filters.me)
-async def clear_cache(client, message):
-    """Clear the admin rights cache."""
-    admin_cache.clear()
-    await message.edit("✅ Admin rights cache cleared!")
-    await asyncio.sleep(3)
-    await message.delete()
-
-
-# Command to check status - send .checkstatus in a group
+# Update the check_status function to use runtime config
 @app.on_message(filters.command("checkstatus", prefixes=".") & filters.me)
 async def check_status(client, message):
     """Check my status in current group."""
     try:
-        # Debug chat type
         print(f"🔍 Debug - Chat type: {message.chat.type}")
         print(f"🔍 Debug - Chat title: {message.chat.title if message.chat.title else 'No title'}")
         print(f"🔍 Debug - Chat ID: {message.chat.id}")
@@ -336,31 +430,24 @@ async def check_status(client, message):
         status_text = "✅ Has admin rights with delete permission" if has_rights else "❌ No admin/delete rights"
         
         # Show current delay settings and owner ID
-        delay_info = f"\n⏱️ Media delay: {DELAY}s | Sticker/GIF delay: {STICKER_DELAY}s"
+        delay_info = f"\n⏱️ Media delay: {get_delay()}s | Sticker/GIF delay: {get_sticker_delay()}s"
 
         # Get owner username
         owner_info = "\n👑 Owner: "
-        if OWNER_ID != 0:
+        if get_owner_id() != 0:
             try:
-                owner_user = await client.get_users(OWNER_ID)
+                owner_user = await client.get_users(get_owner_id())
                 if owner_user.username:
                     owner_info += f"@{owner_user.username}"
                 else:
                     owner_info += f"{owner_user.first_name}"
             except:
-                owner_info += f"ID: {OWNER_ID}"
+                owner_info += f"ID: {get_owner_id()}"
         else:
             owner_info += "Not set"
 
-
-        sticker_status = f"\n🎨 Sticker/GIF deletion: {'✅ ON' if STICKER_GIF_DELETION_ENABLED else '❌ OFF'}"
-        # owner_info = f"\n👑 Owner ID: @freaky_dev"
-        # Start
-        # In your check_status function, add this line after sticker_status:
+        sticker_status = f"\n🎨 Sticker/GIF deletion: {'✅ ON' if is_sticker_deletion_enabled() else '❌ OFF'}"
         pause_status = f"\n⏸️ Bot Status: {'PAUSED - ' + PAUSE_REASON if BOT_PAUSED else '✅ Running'}"
-
-        # Update the final message.edit to include pause_status:
-        # Ends
         sudo_info = f"\n🛡️ Sudo users: {len(SUDO_USERS)}"
         
         await message.edit(f"Status in '{message.chat.title}': {status_text}{delay_info}{sticker_status}{pause_status}{owner_info}{sudo_info}")
@@ -368,8 +455,113 @@ async def check_status(client, message):
         await message.edit(f"❌ Error: {e}")
     
     await asyncio.sleep(5)
+    await message.delete()
 
+# Keep all your other existing commands unchanged
 
+# Update the sticker toggle command to use runtime config
+@app.on_message(filters.command("stickertoggle", prefixes=".") & filters.me)
+async def toggle_sticker_deletion(client, message):
+    """Toggle sticker and GIF deletion on/off."""
+    RUNTIME_CONFIG["STICKER_GIF_DELETION_ENABLED"] = not RUNTIME_CONFIG["STICKER_GIF_DELETION_ENABLED"]
+    
+    if save_runtime_config():
+        status = "✅ ENABLED" if is_sticker_deletion_enabled() else "❌ DISABLED"
+        await message.edit(f"🎨 Sticker/GIF deletion is now {status}")
+        print(f"🎨 Sticker/GIF deletion toggled to: {status}")
+    else:
+        # Rollback on save failure
+        RUNTIME_CONFIG["STICKER_GIF_DELETION_ENABLED"] = not RUNTIME_CONFIG["STICKER_GIF_DELETION_ENABLED"]
+        await message.edit("❌ Failed to save configuration!")
+    
+    await asyncio.sleep(3)
+    await message.delete()
+
+# Update the sticker status command to use runtime config
+@app.on_message(filters.command("stickerstatus", prefixes=".") & filters.me)
+async def sticker_deletion_status(client, message):
+    """Check current sticker/GIF deletion status."""
+    status = "✅ ENABLED" if is_sticker_deletion_enabled() else "❌ DISABLED"
+    delay_info = f" (Delay: {get_sticker_delay()}s)" if is_sticker_deletion_enabled() else ""
+    
+    await message.edit(f"🎨 Sticker/GIF deletion: {status}{delay_info}")
+    
+    await asyncio.sleep(5)
+    await message.delete()
+
+#AdminFix Start
+async def check_admin_rights(client, chat_id, force_check=False):
+    """Check if the user account has admin rights with delete permission."""
+    # Check cache first (unless force_check is True)
+    cache_key = f"{chat_id}"
+    if not force_check and cache_key in admin_cache:
+        cached_time, has_rights = admin_cache[cache_key]
+        if datetime.now() - cached_time < CACHE_DURATION:
+            return has_rights
+    
+    try:
+        # Get chat info first
+        chat = await client.get_chat(chat_id)
+        
+        # Get my own info
+        me = await client.get_me()
+        
+        # Try to get member info
+        try:
+            member = await client.get_chat_member(chat_id, me.id)
+            
+            # Check the string representation of status
+            status_str = str(member.status).lower()
+            
+            # Check different status types (handle both enum and string)
+            if "creator" in status_str or member.status == "creator":
+                has_delete_rights = True
+            elif "administrator" in status_str or member.status == "administrator":
+                # For user accounts as admin, try different ways to check privileges
+                has_delete_rights = True  # Default to True for admins
+                
+                # Try to access privileges in different ways
+                if hasattr(member, 'privileges') and member.privileges:
+                    if hasattr(member.privileges, 'can_delete_messages'):
+                        has_delete_rights = bool(member.privileges.can_delete_messages)
+                elif hasattr(member, 'can_delete_messages'):
+                    has_delete_rights = bool(member.can_delete_messages)
+            else:
+                has_delete_rights = False
+                
+        except Exception as e:
+            print(f"🔍 Debug - Error getting member info: {e}")
+            # If we can't get member info, try a different approach
+            # Try to delete a non-existent message to check permissions
+            try:
+                await client.delete_messages(chat_id, [999999999])
+            except Exception as del_error:
+                error_str = str(del_error).lower()
+                if "message_ids_empty" in error_str or "message to delete not found" in error_str:
+                    # This error means we have permission but message doesn't exist
+                    has_delete_rights = True
+                    print(f"🔍 Debug - Have delete rights (tested with dummy delete)")
+                else:
+                    has_delete_rights = False
+                    print(f"🔍 Debug - No delete rights (test failed: {del_error})")
+        
+        # Cache the result
+        admin_cache[cache_key] = (datetime.now(), has_delete_rights)
+        return has_delete_rights
+        
+    except Exception as e:
+        print(f"❌ Error in check_admin_rights: {e}")
+        admin_cache[cache_key] = (datetime.now(), False)
+        return False
+
+# Command to clear cache - send .clearcache in any chat
+@app.on_message(filters.command("clearcache", prefixes=".") & filters.me)
+async def clear_cache(client, message):
+    """Clear the admin rights cache."""
+    admin_cache.clear()
+    await message.edit("✅ Admin rights cache cleared!")
+    await asyncio.sleep(3)
+    await message.delete()
 
 # Command to test deletion - send .testdelete replying to a message
 @app.on_message(filters.command("testdelete", prefixes=".") & filters.me)
@@ -389,7 +581,6 @@ async def test_delete(client, message):
     
     await asyncio.sleep(3)
     await message.delete()
-
 
 # Command to add sudo user - send .addsudo replying to a user or with user ID
 @app.on_message(filters.command("addsudo", prefixes=".") & filters.me)
@@ -427,7 +618,7 @@ async def add_sudo(client, message):
             return
         
         # Check if user is owner
-        if user_id == OWNER_ID:
+        if user_id == get_owner_id():
             await message.edit("⚠️ Owner is already privileged!")
             await asyncio.sleep(3)
             await message.delete()
@@ -454,7 +645,6 @@ async def add_sudo(client, message):
     
     await asyncio.sleep(3)
     await message.delete()
-
 
 # Command to list sudo users - send .listsudo
 @app.on_message(filters.command("listsudo", prefixes=".") & filters.me)
@@ -486,7 +676,6 @@ async def list_sudo(client, message):
     
     await asyncio.sleep(10)
     await message.delete()
-
 
 # Command to remove sudo user - send .rmsudo replying to a user or with user ID
 @app.on_message(filters.command("rmsudo", prefixes=".") & filters.me)
@@ -545,35 +734,8 @@ async def remove_sudo(client, message):
     await asyncio.sleep(3)
     await message.delete()
 
-# Command to toggle sticker/GIF deletion - send .stickertoggle
-@app.on_message(filters.command("stickertoggle", prefixes=".") & filters.me)
-async def toggle_sticker_deletion(client, message):
-    """Toggle sticker and GIF deletion on/off."""
-    global STICKER_GIF_DELETION_ENABLED
-    
-    STICKER_GIF_DELETION_ENABLED = not STICKER_GIF_DELETION_ENABLED
-    status = "✅ ENABLED" if STICKER_GIF_DELETION_ENABLED else "❌ DISABLED"
-    
-    await message.edit(f"🎨 Sticker/GIF deletion is now {status}")
-    print(f"🎨 Sticker/GIF deletion toggled to: {status}")
-    
-    await asyncio.sleep(3)
-    await message.delete()
+#AdminFix Ends
 
-
-# Command to check sticker/GIF deletion status - send .stickerstatus
-@app.on_message(filters.command("stickerstatus", prefixes=".") & filters.me)
-async def sticker_deletion_status(client, message):
-    """Check current sticker/GIF deletion status."""
-    status = "✅ ENABLED" if STICKER_GIF_DELETION_ENABLED else "❌ DISABLED"
-    delay_info = f" (Delay: {STICKER_DELAY}s)" if STICKER_GIF_DELETION_ENABLED else ""
-    
-    await message.edit(f"🎨 Sticker/GIF deletion: {status}{delay_info}")
-    
-    await asyncio.sleep(5)
-    await message.delete()
-
-# Start
 # Command to pause bot - send .pause
 @app.on_message(filters.command("pause", prefixes=".") & filters.me)
 async def pause_bot(client, message):
@@ -820,8 +982,9 @@ async def list_exemptions(client, message):
 # End
 
 print("Starting media cleaner userbot...")
-print(f"⏱️  Media deletion delay: {DELAY} seconds")
-print(f"🎨 Sticker/GIF deletion delay: {STICKER_DELAY} seconds")
-print(f"👑 Owner ID: {OWNER_ID if OWNER_ID != 0 else 'Not set'}")
+print(f"⏱️  Media deletion delay: {get_delay()} seconds")
+print(f"🎨 Sticker/GIF deletion delay: {get_sticker_delay()} seconds")
+print(f"👑 Owner ID: {get_owner_id() if get_owner_id() != 0 else 'Not set'}")
+print("Commands: config, setconfig, resetconfig, addsudo, listsudo, rmsudo, clearcache, checkstatus, testdelete, stickertoggle, stickerstatus, pause, resume, clear, exempt")
 print("Commands: addsudo, listsudo, rmsudo, clearcache, checkstatus, testdelete, stickertoggle, stickerstatus, pause, resume, clear, exempt")
 app.run()
