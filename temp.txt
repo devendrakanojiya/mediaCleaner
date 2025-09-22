@@ -1,0 +1,34 @@
+1. modularity
+2. /all
+
+
+
+Commands
+Configuration
+.config - View current configuration
+.setconfig <key> <value> - Update configuration
+.resetconfig [confirm] - Reset to defaults
+
+Admin
+.checkstatus - Check bot status in current group
+.clearcache - Clear admin rights cache
+.testdelete - Test deletion (reply to a message)
+
+Sudo Management
+.addsudo - Add sudo user (reply or provide ID)
+.rmsudo - Remove sudo user
+.listsudo - List all sudo users
+
+Exemptions
+.exempt [duration] - Temporarily exempt user (e.g., .exempt 2h)
+.listexempt - List active exemptions
+.rmexempt - Remove user exemption
+
+Media Control
+.stickertoggle - Toggle sticker/GIF deletion
+.stickerstatus - Check sticker deletion status
+.clear [confirm] - Clear all media in current chat
+
+Quick Actions
+.pause [reason] - Pause bot
+.resume - Resume bot
